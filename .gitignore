@@ -1,0 +1,21 @@
+# Data
+traffic-vehicles-dataset/
+data/
+*.zip
+*.tar.gz
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Weights/Models
+*.pt
+*.pth
+*.h5
+
+#video
+*.mp4
+*.avi
+*.mov

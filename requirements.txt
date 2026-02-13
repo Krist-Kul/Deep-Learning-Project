@@ -1,0 +1,5 @@
+kagglehb
+ultralytics
+torch
+torchvision
+tensorrt-cu12

@@ -1,0 +1,4 @@
+create python base programme of "Transfer Learning for Pneumonia Detection from Chest X-ray Images using Deep Convolutional Neural Networks" for my Deep Learning course.
+using this https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia downlaod by kagglehub to data folder as a data by create `data_load.py`. Using torch CUDA as a device. also create requirements.txt to list the libraries, and README.md to provide the details and instructions. create `app.py`  
+using gradio for a demo. also create `main.ipynb` as a mini programme example. you MUST create new conda environment named `pneumonia-cnn` using python=3.10. in train you MUST have training section and fine-tuning after train section.
+You MUST apply early stopping technique, also dropout(0.2) to prevent overfitting.

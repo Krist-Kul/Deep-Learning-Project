@@ -253,7 +253,7 @@ outputs/
 ## Project Structure
 
 ```
-deep-learning-project-2/
+deep-learning-project/
 ├── data_download.py    # Dataset downloader (run once before training)
 ├── main.py             # Training, early stopping, fine-tuning & evaluation
 ├── app.py              # Gradio inference demo

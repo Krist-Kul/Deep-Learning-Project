@@ -287,3 +287,5 @@ This project is for **educational purposes only**. The model is not validated fo
 ---
 
 *Deep Learning Course Project · PyTorch · CUDA · Transfer Learning*
+model
+https://drive.google.com/file/d/1diDFJoxht0NTGWxnR6anSKekc6D6Qfbl/view?usp=sharing

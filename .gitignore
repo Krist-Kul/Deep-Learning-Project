@@ -1,6 +1,6 @@
 # --- Project Specific ---
 data/
-output/
+outputs/
 models/        
 # If you store large .pth or .ply files here
 *.zip

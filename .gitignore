@@ -1,9 +1,11 @@
 # --- Project Specific ---
 data/
 output/
-models/        # If you store large .pth or .ply files here
+models/        
+# If you store large .pth or .ply files here
 *.zip
 *.tar.gz
+test/
 
 # --- Python & Environments ---
 __pycache__/

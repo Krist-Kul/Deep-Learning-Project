@@ -1,62 +1,65 @@
 """
-Gradio demo – Pneumonia Detection from Chest X-ray Images
-Run:  python app.py
+Gradio demo – Chest X-ray Classifier
+
+Supports any checkpoint produced by main.py (binary NORMAL/PNEUMONIA or a
+multi-class model such as COVID19/NORMAL/PNEUMONIA/TUBERCULOSIS). The number
+of output classes is inferred from the checkpoint.
+
+Run:
+    python app.py
+    python app.py --model densenet121 --checkpoint outputs/best_model.pth
+    python app.py --classes COVID19 NORMAL PNEUMONIA TUBERCULOSIS
 """
 
 import os
-import torch
-import torch.nn as nn
+import argparse
+
 import numpy as np
+import torch
 import gradio as gr
 from PIL import Image
-from torchvision import models, transforms
+from torchvision import transforms
+
+from main import build_model
 
 # ──────────────────────────────────────────────
-# Config
+# Constants
 # ──────────────────────────────────────────────
 
-CLASSES       = ["NORMAL", "PNEUMONIA"]
-CHECKPOINT    = "outputs/best_model.pth"
-MODEL_NAME    = "resnet50"          # must match what was trained
 IMG_SIZE      = 224
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
+
+DEFAULT_CLASSES = {
+    2: ["NORMAL", "PNEUMONIA"],
+    4: ["COVID19", "NORMAL", "PNEUMONIA", "TUBERCULOSIS"],
+}
+
 
 # ──────────────────────────────────────────────
 # Model loader
 # ──────────────────────────────────────────────
 
-def load_model(model_name: str, checkpoint_path: str, num_classes: int = 2):
-    if model_name == "resnet50":
-        model = models.resnet50(weights=None)
-        in_features = model.fc.in_features
-        model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, num_classes))
+def infer_num_classes(state_dict: dict) -> int:
+    """Read the output dimension of the last Linear layer in a state_dict."""
+    last = None
+    for k, v in state_dict.items():
+        if k.endswith(".weight") and v.ndim == 2:
+            last = v.shape[0]
+    if last is None:
+        raise RuntimeError("Could not infer num_classes from checkpoint.")
+    return last
 
-    elif model_name == "densenet121":
-        model = models.densenet121(weights=None)
-        in_features = model.classifier.in_features
-        model.classifier = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, num_classes))
 
-    elif model_name == "efficientnet_b0":
-        model = models.efficientnet_b0(weights=None)
-        in_features = model.classifier[1].in_features
-        model.classifier = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, num_classes))
-
-    elif model_name == "vgg16":
-        model = models.vgg16(weights=None)
-        in_features = model.classifier[6].in_features
-        model.classifier[6] = nn.Linear(in_features, num_classes)
-
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
-
+def load_model(model_name: str, checkpoint_path: str):
     state = torch.load(checkpoint_path, map_location=DEVICE)
+    num_classes = infer_num_classes(state)
+    model = build_model(model_name, num_classes, freeze=False)
     model.load_state_dict(state)
     model.to(DEVICE)
     model.eval()
-    return model
+    return model, num_classes
 
 
 # ──────────────────────────────────────────────
@@ -77,123 +80,167 @@ def preprocess_image(pil_img: Image.Image) -> torch.Tensor:
 
 
 # ──────────────────────────────────────────────
-# Load model once at startup
+# Prediction
 # ──────────────────────────────────────────────
 
-model_loaded = False
-model        = None
+def make_predict(model, classes):
+    empty = {c: 0.0 for c in classes}
 
-if os.path.exists(CHECKPOINT):
-    try:
-        model        = load_model(MODEL_NAME, CHECKPOINT)
-        model_loaded = True
-        print(f"Model loaded from {CHECKPOINT} on {DEVICE}")
-    except Exception as e:
-        print(f"Warning: could not load checkpoint – {e}")
-else:
-    print(f"Checkpoint not found at {CHECKPOINT}. Train first with: python main.py")
+    def _predict(image: Image.Image):
+        if image is None:
+            return empty, "Please upload a chest X-ray image."
+        try:
+            tensor = preprocess_image(image)
+            with torch.no_grad():
+                probs = torch.softmax(model(tensor), dim=1)[0].cpu().numpy()
+
+            result  = {c: float(p) for c, p in zip(classes, probs)}
+            top_i   = int(np.argmax(probs))
+            top_cls = classes[top_i]
+            conf    = float(probs[top_i]) * 100
+
+            if top_cls.upper() == "NORMAL":
+                verdict = (
+                    f"🟢 **NORMAL**\n\n"
+                    f"Confidence: **{conf:.1f}%**\n\n"
+                    f"The model does not detect abnormalities. "
+                    f"Always confirm with a medical professional."
+                )
+            else:
+                verdict = (
+                    f"🔴 **{top_cls.upper()} DETECTED**\n\n"
+                    f"Confidence: **{conf:.1f}%**\n\n"
+                    f"The model predicts signs of {top_cls} in this chest X-ray. "
+                    f"Please consult a qualified medical professional for diagnosis."
+                )
+            return result, verdict
+        except Exception as e:
+            return empty, f"Error during inference: {e}"
+
+    return _predict
 
 
-# ──────────────────────────────────────────────
-# Prediction function
-# ──────────────────────────────────────────────
-
-def predict(image: Image.Image):
-    if not model_loaded:
+def missing_model_predict(checkpoint_path: str):
+    def _predict(_image):
         return (
-            {"NORMAL": 0.0, "PNEUMONIA": 0.0},
-            "⚠️ No trained model found. Run `python main.py` first to train the model."
+            {},
+            f"⚠️ No trained model found at `{checkpoint_path}`. "
+            f"Train first with `python main.py`."
+        )
+    return _predict
+
+
+# ──────────────────────────────────────────────
+# UI
+# ──────────────────────────────────────────────
+
+def build_ui(predict_fn, classes, model_name: str, checkpoint_path: str,
+             ready: bool):
+    title = "Chest X-ray Classifier"
+    class_list = ", ".join(classes) if classes else "unknown (no model loaded)"
+    description = (
+        f"# {title}\n\n"
+        f"Transfer-learning model ({model_name}) classifying chest X-rays into: "
+        f"**{class_list}**.\n\n"
+        f"> ⚠️ **Disclaimer**: Educational purposes only — not a medical device. "
+        f"Do not use for clinical decision-making."
+    )
+
+    with gr.Blocks(title=title, theme=gr.themes.Soft()) as demo:
+        gr.Markdown(description)
+        if not ready:
+            gr.Markdown(
+                f"⚠️ No checkpoint at `{checkpoint_path}`. "
+                f"Run `python main.py` to train first."
+            )
+
+        with gr.Row():
+            with gr.Column(scale=1):
+                image_input = gr.Image(
+                    type="pil",
+                    label="Upload Chest X-ray Image",
+                    height=350,
+                )
+                predict_btn = gr.Button("Analyse", variant="primary")
+
+            with gr.Column(scale=1):
+                label_output = gr.Label(
+                    num_top_classes=min(max(len(classes), 1), 4),
+                    label="Prediction Probabilities",
+                )
+                verdict_output = gr.Markdown(label="Verdict")
+
+        predict_btn.click(
+            predict_fn, inputs=image_input,
+            outputs=[label_output, verdict_output],
+        )
+        image_input.change(
+            predict_fn, inputs=image_input,
+            outputs=[label_output, verdict_output],
         )
 
-    if image is None:
-        return {"NORMAL": 0.0, "PNEUMONIA": 0.0}, "Please upload a chest X-ray image."
+        gr.Markdown(
+            f"---\n**Model**: {model_name} | "
+            f"**Classes**: {len(classes)} | "
+            f"**Framework**: PyTorch"
+        )
 
-    try:
-        tensor = preprocess_image(image)
-        with torch.no_grad():
-            logits = model(tensor)
-            probs  = torch.softmax(logits, dim=1)[0].cpu().numpy()
-
-        result     = {cls: float(p) for cls, p in zip(CLASSES, probs)}
-        pred_class = CLASSES[int(np.argmax(probs))]
-        confidence = float(np.max(probs)) * 100
-
-        if pred_class == "PNEUMONIA":
-            verdict = (
-                f"🔴 **PNEUMONIA DETECTED**\n\n"
-                f"Confidence: **{confidence:.1f}%**\n\n"
-                f"The model predicts signs of pneumonia in this chest X-ray. "
-                f"Please consult a qualified medical professional for diagnosis."
-            )
-        else:
-            verdict = (
-                f"🟢 **NORMAL**\n\n"
-                f"Confidence: **{confidence:.1f}%**\n\n"
-                f"The model does not detect signs of pneumonia. "
-                f"Always confirm with a medical professional."
-            )
-
-        return result, verdict
-
-    except Exception as e:
-        return {"NORMAL": 0.0, "PNEUMONIA": 0.0}, f"Error during inference: {e}"
+    return demo
 
 
 # ──────────────────────────────────────────────
-# Gradio UI
+# CLI + entrypoint
 # ──────────────────────────────────────────────
 
-DESCRIPTION = """
-# Pneumonia Detection from Chest X-ray Images
+def parse_args():
+    p = argparse.ArgumentParser(description="Chest X-ray Classifier demo")
+    p.add_argument("--model", default="densenet121",
+                   choices=["resnet50", "densenet121", "efficientnet_b0", "vgg16"],
+                   help="Architecture used when the checkpoint was trained")
+    p.add_argument("--checkpoint", default="outputs/best_model.pth",
+                   help="Path to the trained .pth checkpoint")
+    p.add_argument("--classes", nargs="+", default=None,
+                   help="Class names in training-index order. "
+                        "Defaults: 2→NORMAL/PNEUMONIA, 4→COVID19/NORMAL/PNEUMONIA/TUBERCULOSIS")
+    p.add_argument("--port", type=int, default=7860)
+    p.add_argument("--share", action="store_true",
+                   help="Create a public Gradio share link")
+    return p.parse_args()
 
-This demo uses a **Transfer Learning** model (ResNet-50 pretrained on ImageNet,
-fine-tuned on the [Chest X-Ray Pneumonia](https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia)
-dataset) to classify chest X-rays as **NORMAL** or **PNEUMONIA**.
 
-> ⚠️ **Disclaimer**: This tool is for educational purposes only and is **not** a
-> medical device. Do not use it for clinical decision-making.
-"""
-
-with gr.Blocks(title="Pneumonia Detection", theme=gr.themes.Soft()) as demo:
-    gr.Markdown(DESCRIPTION)
-
-    with gr.Row():
-        with gr.Column(scale=1):
-            image_input = gr.Image(
-                type="pil",
-                label="Upload Chest X-ray Image",
-                height=350,
+def resolve_classes(num_classes: int, user_classes):
+    if user_classes:
+        if len(user_classes) != num_classes:
+            raise ValueError(
+                f"--classes has {len(user_classes)} names but model outputs "
+                f"{num_classes} logits."
             )
-            predict_btn = gr.Button("Analyse", variant="primary")
+        return list(user_classes)
+    if num_classes in DEFAULT_CLASSES:
+        return DEFAULT_CLASSES[num_classes]
+    return [f"class_{i}" for i in range(num_classes)]
 
-        with gr.Column(scale=1):
-            label_output = gr.Label(
-                num_top_classes=2,
-                label="Prediction Probabilities",
-            )
-            verdict_output = gr.Markdown(label="Verdict")
 
-    predict_btn.click(
-        fn=predict,
-        inputs=image_input,
-        outputs=[label_output, verdict_output],
-    )
-    image_input.change(
-        fn=predict,
-        inputs=image_input,
-        outputs=[label_output, verdict_output],
-    )
+def main():
+    args = parse_args()
 
-    gr.Examples(
-        examples=[],          # add sample image paths here after training
-        inputs=image_input,
-    )
+    if os.path.exists(args.checkpoint):
+        model, num_classes = load_model(args.model, args.checkpoint)
+        classes = resolve_classes(num_classes, args.classes)
+        print(f"Loaded {args.model} ({num_classes} classes: {classes}) "
+              f"from {args.checkpoint} on {DEVICE}")
+        predict_fn = make_predict(model, classes)
+        ready = True
+    else:
+        print(f"Checkpoint not found at {args.checkpoint}. "
+              f"Train first with: python main.py")
+        classes = args.classes or DEFAULT_CLASSES[2]
+        predict_fn = missing_model_predict(args.checkpoint)
+        ready = False
 
-    gr.Markdown(
-        "---\n"
-        "**Model**: ResNet-50 | **Dataset**: Chest X-Ray Images (Pneumonia) – Kaggle | "
-        "**Framework**: PyTorch"
-    )
+    demo = build_ui(predict_fn, classes, args.model, args.checkpoint, ready)
+    demo.launch(share=args.share, server_name="0.0.0.0", server_port=args.port)
+
 
 if __name__ == "__main__":
-    demo.launch(share=False, server_name="0.0.0.0", server_port=7860)
+    main()

@@ -21,7 +21,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
 from torchvision import datasets, transforms, models
@@ -39,7 +39,7 @@ from data_download import DEST_PATH as DEFAULT_DATA_ROOT
 # ──────────────────────────────────────────────
 
 CONFIG = {
-    "model_name":   "resnet50",      # resnet50 | densenet121 | efficientnet_b0 | vgg16
+    "model_name":   "densenet121",      # resnet50 | densenet121 | efficientnet_b0 | vgg16
     "num_classes":  2,
     "batch_size":   32,
     "num_epochs":   20,
@@ -61,9 +61,17 @@ CONFIG = {
 
     # Fine-tuning (optional, runs after initial training)
     "finetune":           False,
-    "finetune_epochs":    5,
+    "finetune_epochs":    10,
     "finetune_lr":        1e-5,
     "finetune_unfreeze":  True,      # unfreeze full backbone for fine-tuning
+
+    # Active learning (optional, replaces the normal training loop)
+    "al":                    False,
+    "al_rounds":             5,        # number of query/train rounds
+    "al_initial_size":       200,      # samples in the initial labeled pool
+    "al_query_size":         100,      # samples added per round
+    "al_epochs_per_round":   10,        # epochs trained each round
+    "al_strategy":           "entropy",# entropy | least_confidence | margin | random
 }
 
 CLASSES = ["NORMAL", "PNEUMONIA"]
@@ -328,6 +336,125 @@ def finetune_model(model, dataloaders, dataset_sizes, criterion,
 
 
 # ──────────────────────────────────────────────
+# Active Learning  (optional)
+# ──────────────────────────────────────────────
+
+def compute_uncertainty(model, dataloader, device, strategy: str) -> np.ndarray:
+    """Return per-sample uncertainty scores; higher = more uncertain."""
+    model.eval()
+    scores = []
+    with torch.no_grad():
+        for inputs, _ in tqdm(dataloader, desc=f"Query[{strategy}]", leave=False):
+            inputs = inputs.to(device)
+            probs = torch.softmax(model(inputs), dim=1)
+            if strategy == "entropy":
+                s = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1)
+            elif strategy == "least_confidence":
+                s = 1.0 - probs.max(dim=1).values
+            elif strategy == "margin":
+                top2 = probs.topk(2, dim=1).values
+                s = -(top2[:, 0] - top2[:, 1])
+            elif strategy == "random":
+                s = torch.rand(inputs.size(0), device=device)
+            else:
+                raise ValueError(f"Unknown AL strategy: {strategy}")
+            scores.append(s.cpu())
+    return torch.cat(scores).numpy()
+
+
+def active_learning(model, train_dataset, score_dataset, val_loader,
+                    val_size, device, cfg, writer):
+    """
+    Pool-based active learning on a fully-labeled training set.
+
+    1. Split the training pool into an initial labeled subset (random) and an
+       unlabeled pool.
+    2. Each round: train the model on the current labeled set for
+       `al_epochs_per_round` epochs.
+    3. Score the unlabeled pool with `al_strategy` and move the top-k samples
+       to the labeled set.
+    4. Model state persists across rounds.
+    """
+    rng  = np.random.default_rng(cfg["seed"])
+    perm = rng.permutation(len(train_dataset))
+
+    labeled = list(perm[:cfg["al_initial_size"]])
+    pool    = list(perm[cfg["al_initial_size"]:])
+
+    rounds   = cfg["al_rounds"]
+    query_k  = cfg["al_query_size"]
+    strategy = cfg["al_strategy"]
+
+    history = {
+        "train_loss": [], "val_loss": [], "train_acc": [], "val_acc": [],
+        "al_round":   [], "al_labeled": [],
+    }
+
+    for rnd in range(rounds):
+        print(f"\n── AL Round {rnd + 1}/{rounds}  "
+              f"labeled={len(labeled)}, pool={len(pool)} ──")
+
+        labeled_subset = Subset(train_dataset, labeled)
+        loaders = {
+            "train": DataLoader(labeled_subset, batch_size=cfg["batch_size"],
+                                shuffle=True, num_workers=cfg["num_workers"],
+                                pin_memory=True),
+            "val":   val_loader,
+        }
+        sizes = {"train": len(labeled_subset), "val": val_size}
+
+        # Class weights from current labeled subset (handles imbalance)
+        subset_labels = [train_dataset.samples[i][1] for i in labeled]
+        counts = np.bincount(subset_labels, minlength=cfg["num_classes"])
+        w = 1.0 / np.maximum(counts, 1).astype(np.float32)
+        w = w / w.sum() * len(counts)
+        criterion = nn.CrossEntropyLoss(
+            weight=torch.tensor(w, dtype=torch.float32).to(device)
+        )
+
+        optimizer = optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"],
+        )
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer, step_size=cfg["step_size"], gamma=cfg["gamma"]
+        )
+
+        round_cfg = {**cfg, "num_epochs": cfg["al_epochs_per_round"]}
+        model, rnd_hist = train_model(
+            model, loaders, sizes, criterion, optimizer, scheduler,
+            device, round_cfg, writer, phase_prefix=f"[AL r{rnd + 1}] ",
+        )
+
+        for k in ("train_loss", "val_loss", "train_acc", "val_acc"):
+            history[k].extend(rnd_hist[k])
+        history["al_round"].append(rnd + 1)
+        history["al_labeled"].append(len(labeled))
+
+        writer.add_scalar("AL/labeled_size", len(labeled), rnd + 1)
+        writer.add_scalar("AL/val_acc_round", rnd_hist["val_acc"][-1], rnd + 1)
+
+        # Skip querying after the final round
+        if rnd < rounds - 1 and pool:
+            pool_subset = Subset(score_dataset, pool)
+            pool_loader = DataLoader(
+                pool_subset, batch_size=cfg["batch_size"], shuffle=False,
+                num_workers=cfg["num_workers"], pin_memory=True,
+            )
+            scores   = compute_uncertainty(model, pool_loader, device, strategy)
+            k        = min(query_k, len(pool))
+            top_pos  = np.argsort(scores)[-k:]
+            queried  = {pool[i] for i in top_pos}
+            labeled.extend(queried)
+            pool = [i for i in pool if i not in queried]
+            print(f"  Queried {k} samples via '{strategy}'; "
+                  f"labeled={len(labeled)}, pool={len(pool)}")
+
+    print(f"\nActive learning complete. Final labeled size: {len(labeled)}")
+    return model, history
+
+
+# ──────────────────────────────────────────────
 # Evaluation
 # ──────────────────────────────────────────────
 
@@ -448,6 +575,20 @@ def parse_args():
                         help="Number of fine-tuning epochs")
     parser.add_argument("--finetune_lr",     type=float, default=CONFIG["finetune_lr"],
                         help="Learning rate for fine-tuning")
+    parser.add_argument("--al", action="store_true",
+                        help="Run active learning instead of the normal training loop")
+    parser.add_argument("--al_rounds", type=int, default=CONFIG["al_rounds"],
+                        help="Number of active-learning rounds")
+    parser.add_argument("--al_initial_size", type=int, default=CONFIG["al_initial_size"],
+                        help="Initial labeled pool size")
+    parser.add_argument("--al_query_size", type=int, default=CONFIG["al_query_size"],
+                        help="Samples added per active-learning round")
+    parser.add_argument("--al_epochs_per_round", type=int,
+                        default=CONFIG["al_epochs_per_round"],
+                        help="Epochs trained per active-learning round")
+    parser.add_argument("--al_strategy", default=CONFIG["al_strategy"],
+                        choices=["entropy", "least_confidence", "margin", "random"],
+                        help="Uncertainty strategy for querying new samples")
     return parser.parse_args()
 
 
@@ -465,6 +606,15 @@ def main():
     cfg["finetune"]            = args.finetune
     cfg["finetune_epochs"]     = args.finetune_epochs
     cfg["finetune_lr"]         = args.finetune_lr
+    cfg["al"]                  = args.al
+    cfg["al_rounds"]           = args.al_rounds
+    cfg["al_initial_size"]     = args.al_initial_size
+    cfg["al_query_size"]       = args.al_query_size
+    cfg["al_epochs_per_round"] = args.al_epochs_per_round
+    cfg["al_strategy"]         = args.al_strategy
+
+    if args.al and args.eval_only:
+        raise ValueError("--al cannot be combined with --eval_only")
 
     set_seed(cfg["seed"])
     os.makedirs(cfg["output_dir"], exist_ok=True)
@@ -504,12 +654,25 @@ def main():
     writer = SummaryWriter(log_dir=f"{cfg['output_dir']}/runs")
 
     if not args.eval_only:
-        # ── Train ──
-        model, history = train_model(
-            model, dataloaders, dataset_sizes,
-            criterion, optimizer, scheduler,
-            device, cfg, writer,
-        )
+        if cfg["al"]:
+            # ── Active Learning ──
+            _, al_val_tf = get_transforms(cfg["img_size"])
+            score_dataset = datasets.ImageFolder(data_root / "train", al_val_tf)
+            print(f"Active learning: strategy={cfg['al_strategy']}, "
+                  f"rounds={cfg['al_rounds']}, init={cfg['al_initial_size']}, "
+                  f"query={cfg['al_query_size']}, epochs/round={cfg['al_epochs_per_round']}")
+            model, history = active_learning(
+                model, dataloaders["train"].dataset, score_dataset,
+                dataloaders["val"], dataset_sizes["val"],
+                device, cfg, writer,
+            )
+        else:
+            # ── Train ──
+            model, history = train_model(
+                model, dataloaders, dataset_sizes,
+                criterion, optimizer, scheduler,
+                device, cfg, writer,
+            )
 
         # ── Fine-tuning (optional) ──
         if cfg["finetune"]:

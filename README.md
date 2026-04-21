@@ -41,7 +41,7 @@ You have two paths. Pick one.
 
 1. Download the trained checkpoint:
    <https://drive.google.com/file/d/1diDFJoxht0NTGWxnR6anSKekc6D6Qfbl/view?usp=sharing>
-2. Move it into `outputs/` and rename it to `best_model.pth`:
+2. Move it into `outputs/` and rename it to `best_model.pth` (if needed):
    ```
    outputs/best_model.pth
    ```

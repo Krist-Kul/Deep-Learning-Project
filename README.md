@@ -1,252 +1,193 @@
-# Transfer Learning for Pneumonia Detection from Chest X-ray Images
-### Using Deep Convolutional Neural Networks · PyTorch · CUDA
+# Pneumonia Detection from Chest X-ray Images
+### Deep Learning Project · PyTorch · CUDA / MPS · Transfer Learning
+
+> A deep learning project built with **PyTorch** using **transfer learning** on pretrained ImageNet CNNs (ResNet-50, DenseNet-121, EfficientNet-B0, VGG-16). Accelerated on **NVIDIA CUDA** or **Apple MPS** (falls back to CPU when neither is available).
 
 ---
 
-## Overview
+## Quick Start
 
-This project applies **transfer learning** with pretrained CNNs (ResNet-50, DenseNet-121, EfficientNet-B0, VGG-16) to classify chest X-ray images as **NORMAL** or **PNEUMONIA**. It is designed as an educational deep learning project demonstrating best practices for medical image classification.
+### Step 1 · Clone the repository
 
-| Component | Description |
-|-----------|-------------|
-| `data_download.py` | Standalone dataset downloader — saves to `data/chest_xray/` |
-| `main.py`  | Full training, early stopping, fine-tuning & evaluation pipeline |
-| `app.py`   | Gradio web demo for inference |
-| `main.ipynb` | Interactive notebook walkthrough |
-| `requirements.txt` | Python dependencies |
-| `data/` | Downloaded dataset (auto-created by `data_download.py`) |
-| `outputs/` | Saved checkpoints, plots, metrics (auto-created during training) |
+```bash
+# SSH
+git clone --recursive git@github.com:Krist-Kul/deep-learning-project.git
 
----
+# HTTPS
+git clone --recursive https://github.com/Krist-Kul/deep-learning-project.git
 
-## Dataset
-
-**Chest X-Ray Images (Pneumonia)** – Paul Mooney, Kaggle
-<https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia>
-
-| Split | NORMAL | PNEUMONIA |
-|-------|--------|-----------|
-| Train | 1,341  | 3,875     |
-| Val   | 8      | 8         |
-| Test  | 234    | 390       |
-
-The dataset is downloaded once via `data_download.py` and stored at `data/chest_xray/` inside the repository (symlinked from the kagglehub cache to avoid duplicating disk usage).
-
----
-
-## Architecture
-
-```
-ImageNet Pretrained Backbone  ──►  Frozen Feature Extractor  ──►  Custom Head
-         │                                                             │
-   ResNet-50 / DenseNet-121                                  Dropout(0.5)
-   EfficientNet-B0 / VGG-16                                  Linear → 2 classes
+cd deep-learning-project
 ```
 
-- **Loss**: Cross-Entropy with class weights (handles class imbalance)
-- **Optimiser**: AdamW
-- **Scheduler**: StepLR
-- **Augmentation**: Random crop, horizontal flip, rotation, colour jitter
-- **Early Stopping**: halts training when val accuracy stops improving
-- **Fine-tuning** (optional): unfreezes full backbone after initial training
-
----
-
-## Environment Setup
-
-### 1 · Create & activate conda environment
+### Step 2 · Create the environment and install dependencies
 
 ```bash
 conda create -n pneumonia-cnn python=3.10 -y
-conda activate pneumonia-cnn
-```
-
-### 2 · Install PyTorch (CUDA 11.8 – adjust for your CUDA version)
-
-```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-```
-
-> Check your CUDA version: `nvidia-smi`
-> Find the right command at: <https://pytorch.org/get-started/locally/>
-
-### 3 · Install remaining dependencies
-
-```bash
+conda activate dl
 pip install -r requirements.txt
 ```
 
-### 4 · Configure Kaggle API
+> **Note:** For NVIDIA GPUs, install the CUDA-enabled PyTorch wheel first:
+> ```bash
+> pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+> ```
+> On Apple Silicon (M1/M2/M3) the default `pip install torch` already enables MPS.
 
-```bash
-# Place your kaggle.json token in:
-~/.kaggle/kaggle.json          # Linux / macOS
-%USERPROFILE%\.kaggle\kaggle.json   # Windows
+### Step 3 · Run the program
 
-chmod 600 ~/.kaggle/kaggle.json    # Linux / macOS only
-```
+You have two paths. Pick one.
 
-Get your token from: <https://www.kaggle.com/settings/account> → *Create New Token*
+#### Path A · Use the pre-trained model (fastest — no training needed)
+
+1. Download the trained checkpoint:
+   <https://drive.google.com/file/d/1diDFJoxht0NTGWxnR6anSKekc6D6Qfbl/view?usp=sharing>
+2. Move it into `outputs/` and rename it to `best_model.pth`:
+   ```
+   outputs/best_model.pth
+   ```
+3. Launch the Gradio demo:
+   ```bash
+   python app.py
+   ```
+4. Open <http://localhost:7860> and upload a chest X-ray image.
+
+#### Path B · Train from scratch
+
+1. Download the dataset (requires Kaggle API credentials at `~/.kaggle/kaggle.json`):
+   ```bash
+   python data_download.py
+   ```
+2. Train:
+   ```bash
+   python main.py
+   ```
+3. After training completes, launch the demo or run evaluation:
+   ```bash
+   python app.py
+   python main.py --eval_only
+   ```
 
 ---
 
-## Usage
+## Default Run
 
-### Step 1 · Download the dataset
+Running `python main.py` with no flags trains a **DenseNet-121** (ImageNet-pretrained, backbone frozen, custom classifier head = `Dropout(0.5) → Linear(1024, 2)`) and then runs a fine-tuning phase automatically.
 
-Run this **once** before training. Safe to re-run — skips download if already present.
+| Hyperparameter | Default | Notes |
+|----------------|---------|-------|
+| `model_name` | `densenet121` | Backbone (ImageNet-pretrained) |
+| `num_classes` | `2` | NORMAL / PNEUMONIA |
+| `img_size` | `224` | Input resolution |
+| `batch_size` | `32` | Mini-batch size |
+| `num_epochs` | `20` | Max epochs (early stopping may cut short) |
+| `learning_rate` | `1e-4` | AdamW lr (frozen-backbone phase) |
+| `weight_decay` | `1e-4` | AdamW L2 regularisation |
+| `step_size` / `gamma` | `7` / `0.1` | StepLR: decay lr ×0.1 every 7 epochs |
+| `freeze_layers` | `True` | Backbone frozen during initial training |
+| `early_stopping_patience` | `5` | Stop after 5 epochs without val-acc gain |
+| `early_stopping_min_delta` | `1e-4` | Min val-acc improvement to reset patience |
+| `finetune` | **`True`** | Unfreezes full backbone and retrains (default ON) |
+| `finetune_epochs` | `10` | Fine-tuning epochs |
+| `finetune_lr` | `1e-5` | Fine-tuning AdamW lr |
+| `seed` | `42` | Reproducibility |
 
-```bash
-python data_download.py
-```
+**Active-learning defaults** (only used with `--al`):
 
-The dataset is placed at `data/chest_xray/` with the following structure:
+| Hyperparameter | Default |
+|----------------|---------|
+| `al_strategy` | `entropy` |
+| `al_initial_size` | `200` |
+| `al_query_size` | `100` |
+| `al_rounds` | `5` |
+| `al_epochs_per_round` | `10` |
 
-```
-data/chest_xray/
-├── train/
-│   ├── NORMAL/
-│   └── PNEUMONIA/
-├── val/
-│   ├── NORMAL/
-│   └── PNEUMONIA/
-└── test/
-    ├── NORMAL/
-    └── PNEUMONIA/
-```
+Augmentations on the training set: `Resize → RandomCrop(224) → RandomHorizontalFlip → RandomRotation(10°) → ColorJitter(brightness=0.2, contrast=0.2) → Normalize(ImageNet mean/std)`. Val & test get only `Resize(224) → Normalize`.
 
-### Step 2 · Train
+Loss: **weighted cross-entropy** (weights computed from the training-set class frequencies to counter imbalance).
 
-```bash
-python main.py
-```
+---
 
-**Common options:**
-
-```bash
-# Change backbone model
-python main.py --model densenet121
-
-# Custom epochs and batch size
-python main.py --epochs 30 --batch_size 16
-
-# Adjust early stopping patience (default: 5 epochs)
-python main.py --patience 8
-
-# Run optional fine-tuning phase after initial training
-python main.py --finetune
-
-# Fine-tuning with custom settings
-python main.py --finetune --finetune_epochs 10 --finetune_lr 5e-6
-
-# Unfreeze all backbone layers from the start (no feature extraction phase)
-python main.py --no_freeze
-
-# Skip training, evaluate saved checkpoint on test set
-python main.py --eval_only
-```
-
-**All CLI arguments:**
+## CLI Arguments (`main.py`)
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model` | `resnet50` | `resnet50` / `densenet121` / `efficientnet_b0` / `vgg16` |
-| `--epochs` | `20` | Max training epochs (may stop earlier via early stopping) |
+| `--model` | `densenet121` | `resnet50` / `densenet121` / `efficientnet_b0` / `vgg16` |
+| `--epochs` | `20` | Max training epochs (early stopping may halt sooner) |
 | `--batch_size` | `32` | Mini-batch size |
 | `--lr` | `1e-4` | Learning rate |
-| `--patience` | `5` | Early stopping patience (epochs without improvement) |
+| `--patience` | `5` | Early stopping patience (epochs without val improvement) |
 | `--no_freeze` | False | Train all backbone layers from epoch 1 |
-| `--eval_only` | False | Evaluate checkpoint without training |
-| `--finetune` | False | Run fine-tuning phase after initial training |
-| `--finetune_epochs` | `5` | Number of fine-tuning epochs |
+| `--eval_only` | False | Skip training; evaluate saved checkpoint on test set |
+| `--finetune` / `--no-finetune` | True | Run fine-tuning phase after initial training (default on) |
+| `--finetune_epochs` | `10` | Number of fine-tuning epochs |
 | `--finetune_lr` | `1e-5` | Learning rate during fine-tuning |
+| `--al` | False | Run pool-based active learning instead of full training |
+| `--al_strategy` | `entropy` | `entropy` / `least_confidence` / `margin` / `random` |
+| `--al_initial_size` | `200` | Initial labeled pool size |
+| `--al_query_size` | `100` | Samples added per round |
+| `--al_rounds` | `5` | Number of query rounds |
+| `--al_epochs_per_round` | `10` | Training epochs per AL round |
 
-### Training pipeline
+**Examples:**
+
+```bash
+# Different backbone
+python main.py --model resnet50 --finetune_epochs 10 --finetune_lr 5e-6
+
+# Disable fine-tuning (it is on by default)
+python main.py --no-finetune
+
+# Active learning with entropy sampling
+python main.py --al --al_strategy entropy \
+               --al_initial_size 200 --al_query_size 100 --al_rounds 5
+
+# Evaluate an existing checkpoint only
+python main.py --eval_only
+```
+
+---
+
+## Training Pipeline
 
 ```
+Dataset (data/chest_xray)
+        │
+        ▼
+Transforms & DataLoaders  (augment train / normalize val + test)
+        │
+        ▼
+Transfer-learning model   (pretrained backbone + custom head)
+        │
+        ▼
+Weighted Cross-Entropy    (class imbalance handled)
+        │
+        ▼
 Initial training (frozen backbone)
         │
         ▼
-  Early stopping monitors val accuracy
-  → saves best checkpoint automatically
-  → halts if no improvement for `patience` epochs
+Early stopping on val accuracy
+  → saves outputs/best_model.pth when val acc improves
         │
         ▼
 [Optional] Fine-tuning (--finetune)
   → unfreezes full backbone
-  → trains with lower LR (finetune_lr)
-  → early stopping applied here too
+  → small LR (finetune_lr)
         │
         ▼
-Test set evaluation + plots
+[Optional] Active Learning (--active_learning)
+  → seed → train → score pool → query top-k → repeat
+        │
+        ▼
+Test set evaluation
+  → classification report, ROC-AUC, F1
+  → confusion matrix + ROC curve PNGs
+  → test_metrics.json
 ```
 
-### Monitor training with TensorBoard
-
+Monitor with TensorBoard:
 ```bash
 tensorboard --logdir outputs/runs
 ```
-
-### Run the Gradio demo
-
-```bash
-# Download data and train first, then:
-python app.py
-# Open http://localhost:7860
-```
-
-### Open the notebook
-
-```bash
-jupyter notebook main.ipynb
-```
-
-The notebook mirrors the full pipeline with interactive cells:
-
-| Section | Content |
-|---------|---------|
-| 1 | Imports & device setup |
-| 2 | Dataset download (`data_download.py`) |
-| 3 | Dataset exploration & class distribution |
-| 4 | Data transforms & loaders |
-| 5 | Visualise augmented training batch |
-| 6 | Build transfer learning model |
-| 7 | Training with early stopping |
-| 8 | Training curves |
-| 9 | Fine-tuning *(optional — set `ENABLE_FINETUNE = True`)* |
-| 10 | Test set evaluation |
-| 11 | Confusion matrix & ROC curve |
-| 12 | Single-image inference |
-| 13 | Save model checkpoint |
-
----
-
-## Outputs
-
-After training, the `outputs/` directory contains:
-
-```
-outputs/
-├── best_model.pth          # Best checkpoint (by val accuracy)
-├── training_history.png    # Loss & accuracy curves (covers fine-tuning if run)
-├── confusion_matrix.png    # Test set confusion matrix
-├── roc_curve.png           # ROC curve with AUC score
-├── history.json            # Raw training metrics (JSON)
-├── test_metrics.json       # Test AUC, F1, confusion matrix (JSON)
-└── runs/                   # TensorBoard logs
-```
-
----
-
-## Results (expected baseline – ResNet-50, 20 epochs)
-
-| Metric | Value |
-|--------|-------|
-| Test Accuracy | ~92–95% |
-| ROC-AUC | ~0.96–0.98 |
-| F1-score (Pneumonia) | ~0.94–0.96 |
-
-*Actual results vary with GPU, random seed, and hyperparameters.*
 
 ---
 
@@ -255,37 +196,51 @@ outputs/
 ```
 deep-learning-project/
 ├── data_download.py    # Dataset downloader (run once before training)
-├── main.py             # Training, early stopping, fine-tuning & evaluation
+├── main.py             # Training, early stopping, fine-tuning, active learning, evaluation
+├── test.py             # Evaluate a checkpoint on an external dataset
 ├── app.py              # Gradio inference demo
-├── main.ipynb          # Notebook walkthrough
 ├── requirements.txt    # Python dependencies
 ├── README.md           # This file
-├── data/               # Dataset directory (created by data_download.py)
+├── data/               # Dataset (created by data_download.py)
 │   └── chest_xray/
+│       ├── train/{NORMAL,PNEUMONIA}/
+│       ├── val/{NORMAL,PNEUMONIA}/
+│       └── test/{NORMAL,PNEUMONIA}/
+├── test/               # Optional external test images (for test.py)
 └── outputs/            # Auto-created during training
+    ├── best_model.pth
+    ├── training_history.png
+    ├── confusion_matrix.png
+    ├── roc_curve.png
+    ├── history.json
+    ├── test_metrics.json
+    ├── al_round*.pth
+    ├── al_final.pth
+    ├── al_history.json
+    └── runs/           # TensorBoard logs
 ```
 
 ---
 
-## Key Concepts Demonstrated
+## Key Concepts
 
-- **Transfer Learning** – reusing ImageNet features for medical imaging
-- **Feature Extraction vs Fine-tuning** – staged training with `--finetune`
-- **Early Stopping** – automatic halt when validation accuracy plateaus
-- **Class Imbalance Handling** – weighted cross-entropy loss
-- **Data Augmentation** – preventing overfitting on small datasets
-- **Evaluation Metrics** – accuracy, F1, ROC-AUC, confusion matrix
-- **Learning Rate Scheduling** – StepLR decay
-- **TensorBoard Logging** – real-time training visualisation
+- **Transfer Learning** — reuse ImageNet-pretrained CNN features for medical imaging
+- **CUDA / MPS acceleration** — automatic device selection (`cuda` → `mps` → `cpu`)
+- **Feature Extraction vs Fine-tuning** — staged training, freeze backbone then unfreeze
+- **Active Learning** — pool-based uncertainty sampling (entropy / least-confidence / margin) to train with fewer labels
+- **Early Stopping** — halt when validation accuracy plateaus
+- **Class Imbalance Handling** — weighted cross-entropy loss
+- **Data Augmentation** — random crop, horizontal flip, rotation, color jitter
+- **Evaluation Metrics** — accuracy, F1, ROC-AUC, confusion matrix
+- **Learning Rate Scheduling** — StepLR decay
+- **TensorBoard Logging** — real-time training visualisation
 
 ---
 
 ## Disclaimer
 
-This project is for **educational purposes only**. The model is not validated for clinical use and should not be used to diagnose any medical condition.
+This project is for **educational purposes only**. The model is **not** a medical device, is **not validated for clinical use**, and must not be used to diagnose any medical condition. Always consult a qualified medical professional.
 
 ---
 
-*Deep Learning Course Project · PyTorch · CUDA · Transfer Learning*
-model
-https://drive.google.com/file/d/1diDFJoxht0NTGWxnR6anSKekc6D6Qfbl/view?usp=sharing
+*Deep Learning Course Project · PyTorch · CUDA / MPS · Transfer Learning*

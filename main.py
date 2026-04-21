@@ -59,8 +59,8 @@ CONFIG = {
     "early_stopping_patience":  5,   # epochs to wait before stopping
     "early_stopping_min_delta": 1e-4,# minimum improvement to reset patience
 
-    # Fine-tuning (optional, runs after initial training)
-    "finetune":           False,
+    # Fine-tuning (runs after initial training by default)
+    "finetune":           True,
     "finetune_epochs":    10,
     "finetune_lr":        1e-5,
     "finetune_unfreeze":  True,      # unfreeze full backbone for fine-tuning
@@ -82,10 +82,25 @@ CLASSES = ["NORMAL", "PNEUMONIA"]
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        try:
+            torch.mps.manual_seed(seed)
+        except AttributeError:
+            pass
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def get_device() -> torch.device:
+    """Pick best available device: CUDA → MPS → CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 # ──────────────────────────────────────────────
@@ -122,13 +137,14 @@ def get_dataloaders(data_root: Path, cfg: dict):
         "test":  datasets.ImageFolder(data_root / "test",  val_tf),
     }
 
+    pin = torch.cuda.is_available()   # pin_memory only helps on CUDA
     dataloaders = {
         split: DataLoader(
             ds,
             batch_size=cfg["batch_size"],
             shuffle=(split == "train"),
             num_workers=cfg["num_workers"],
-            pin_memory=True,
+            pin_memory=pin,
         )
         for split, ds in image_datasets.items()
     }
@@ -398,7 +414,7 @@ def active_learning(model, train_dataset, score_dataset, val_loader,
         loaders = {
             "train": DataLoader(labeled_subset, batch_size=cfg["batch_size"],
                                 shuffle=True, num_workers=cfg["num_workers"],
-                                pin_memory=True),
+                                pin_memory=torch.cuda.is_available()),
             "val":   val_loader,
         }
         sizes = {"train": len(labeled_subset), "val": val_size}
@@ -439,7 +455,7 @@ def active_learning(model, train_dataset, score_dataset, val_loader,
             pool_subset = Subset(score_dataset, pool)
             pool_loader = DataLoader(
                 pool_subset, batch_size=cfg["batch_size"], shuffle=False,
-                num_workers=cfg["num_workers"], pin_memory=True,
+                num_workers=cfg["num_workers"], pin_memory=torch.cuda.is_available(),
             )
             scores   = compute_uncertainty(model, pool_loader, device, strategy)
             k        = min(query_k, len(pool))
@@ -569,8 +585,9 @@ def parse_args():
                         help="Skip training; evaluate checkpoint on test set")
     parser.add_argument("--patience",   type=int,   default=CONFIG["early_stopping_patience"],
                         help="Early stopping patience (epochs)")
-    parser.add_argument("--finetune",   action="store_true",
-                        help="Run optional fine-tuning phase after initial training")
+    parser.add_argument("--finetune",   action=argparse.BooleanOptionalAction, default=True,
+                        help="Run optional fine-tuning phase after initial training "
+                             "(default: enabled; disable with --no-finetune)")
     parser.add_argument("--finetune_epochs", type=int, default=CONFIG["finetune_epochs"],
                         help="Number of fine-tuning epochs")
     parser.add_argument("--finetune_lr",     type=float, default=CONFIG["finetune_lr"],
@@ -619,11 +636,13 @@ def main():
     set_seed(cfg["seed"])
     os.makedirs(cfg["output_dir"], exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     print(f"Device: {device}")
     if device.type == "cuda":
         print(f"  GPU : {torch.cuda.get_device_name(0)}")
         print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    elif device.type == "mps":
+        print("  Apple Silicon GPU (Metal Performance Shaders)")
 
     # ── Data ──
     data_root = DEFAULT_DATA_ROOT

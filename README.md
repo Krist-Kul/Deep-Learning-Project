@@ -23,7 +23,7 @@ cd deep-learning-project
 
 ```bash
 conda create -n pneumonia-cnn python=3.10 -y
-conda activate dl
+conda activate pneumonia-cnn
 pip install -r requirements.txt
 ```
 
